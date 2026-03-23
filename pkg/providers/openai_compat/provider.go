@@ -194,7 +194,19 @@ func (p *Provider) Chat(
 		return nil, common.HandleErrorResponse(resp, p.apiBase)
 	}
 
-	return common.ReadAndParseResponse(resp, p.apiBase)
+	out, err := common.ReadAndParseResponse(resp, p.apiBase)
+	if err != nil {
+		return nil, err
+	}
+
+	if out.Content == "" {
+		if out.ReasoningContent != "" {
+			out.Content = out.ReasoningContent
+		} else if out.Reasoning != "" {
+			out.Content = out.Reasoning
+		}
+	}
+	return out, nil
 }
 
 // ChatStream implements streaming via OpenAI-compatible SSE (stream: true).
@@ -254,6 +266,8 @@ func parseStreamResponse(
 	onChunk func(accumulated string),
 ) (*LLMResponse, error) {
 	var textContent strings.Builder
+	var reasoningContent strings.Builder
+	var reasoning strings.Builder
 	var finishReason string
 	var usage *UsageInfo
 
@@ -286,8 +300,10 @@ func parseStreamResponse(
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content   string `json:"content"`
-					ToolCalls []struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					Reasoning        string `json:"reasoning"`
+					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id"`
 						Function *struct {
@@ -321,6 +337,14 @@ func parseStreamResponse(
 			if onChunk != nil {
 				onChunk(textContent.String())
 			}
+		}
+
+		// Accumulate reasoning content
+		if choice.Delta.ReasoningContent != "" {
+			reasoningContent.WriteString(choice.Delta.ReasoningContent)
+		}
+		if choice.Delta.Reasoning != "" {
+			reasoning.WriteString(choice.Delta.Reasoning)
 		}
 
 		// Accumulate tool call deltas
@@ -378,12 +402,24 @@ func parseStreamResponse(
 		finishReason = "stop"
 	}
 
-	return &LLMResponse{
-		Content:      textContent.String(),
-		ToolCalls:    toolCalls,
-		FinishReason: finishReason,
-		Usage:        usage,
-	}, nil
+	resp := &LLMResponse{
+		Content:          textContent.String(),
+		ReasoningContent: reasoningContent.String(),
+		Reasoning:        reasoning.String(),
+		ToolCalls:        toolCalls,
+		FinishReason:     finishReason,
+		Usage:            usage,
+	}
+
+	if resp.Content == "" {
+		if resp.ReasoningContent != "" {
+			resp.Content = resp.ReasoningContent
+		} else if resp.Reasoning != "" {
+			resp.Content = resp.Reasoning
+		}
+	}
+
+	return resp, nil
 }
 
 func normalizeModel(model, apiBase string) string {
