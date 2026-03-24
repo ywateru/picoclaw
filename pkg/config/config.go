@@ -114,6 +114,25 @@ func (c *Config) WithSecurity(sec *SecurityConfig) *Config {
 	return c
 }
 
+// FilterSensitiveData filters sensitive values from content before sending to LLM.
+// This prevents the LLM from seeing its own credentials.
+// Uses strings.Replacer for O(n+m) performance (computed once per SecurityConfig).
+// Short content (below FilterMinLength) is returned unchanged for performance.
+func (c *Config) FilterSensitiveData(content string) string {
+	if c.security == nil || content == "" {
+		return content
+	}
+	// Check if filtering is enabled (default: true)
+	if !c.Tools.IsFilterSensitiveDataEnabled() {
+		return content
+	}
+	// Fast path: skip filtering for short content
+	if len(content) < c.Tools.GetFilterMinLength() {
+		return content
+	}
+	return c.security.SensitiveDataReplacer().Replace(content)
+}
+
 type HooksConfig struct {
 	Enabled   bool                         `json:"enabled"`
 	Defaults  HookDefaultsConfig           `json:"defaults,omitempty"`
@@ -909,8 +928,9 @@ type DevicesConfig struct {
 }
 
 type VoiceConfig struct {
-	ModelName         string `json:"model_name,omitempty" env:"PICOCLAW_VOICE_MODEL_NAME"`
-	EchoTranscription bool   `json:"echo_transcription"   env:"PICOCLAW_VOICE_ECHO_TRANSCRIPTION"`
+	ModelName         string `json:"model_name,omitempty"         env:"PICOCLAW_VOICE_MODEL_NAME"`
+	EchoTranscription bool   `json:"echo_transcription"           env:"PICOCLAW_VOICE_ECHO_TRANSCRIPTION"`
+	ElevenLabsAPIKey  string `json:"elevenlabs_api_key,omitempty" env:"PICOCLAW_VOICE_ELEVENLABS_API_KEY"`
 }
 
 // ModelConfig represents a model-centric provider configuration.
@@ -1201,8 +1221,16 @@ type ReadFileToolConfig struct {
 }
 
 type ToolsConfig struct {
-	AllowReadPaths  []string           `json:"allow_read_paths"  env:"PICOCLAW_TOOLS_ALLOW_READ_PATHS"`
-	AllowWritePaths []string           `json:"allow_write_paths" env:"PICOCLAW_TOOLS_ALLOW_WRITE_PATHS"`
+	AllowReadPaths  []string `json:"allow_read_paths"  env:"PICOCLAW_TOOLS_ALLOW_READ_PATHS"`
+	AllowWritePaths []string `json:"allow_write_paths" env:"PICOCLAW_TOOLS_ALLOW_WRITE_PATHS"`
+	// FilterSensitiveData controls whether to filter sensitive values (API keys,
+	// tokens, secrets) from tool results before sending to the LLM.
+	// Default: true (enabled)
+	FilterSensitiveData bool `json:"filter_sensitive_data" env:"PICOCLAW_TOOLS_FILTER_SENSITIVE_DATA"`
+	// FilterMinLength is the minimum content length required for filtering.
+	// Content shorter than this will be returned unchanged for performance.
+	// Default: 8
+	FilterMinLength int                `json:"filter_min_length" env:"PICOCLAW_TOOLS_FILTER_MIN_LENGTH"`
 	Web             WebToolsConfig     `json:"web"`
 	Cron            CronToolsConfig    `json:"cron"`
 	Exec            ExecConfig         `json:"exec"`
@@ -1224,6 +1252,19 @@ type ToolsConfig struct {
 	Subagent        ToolConfig         `json:"subagent"                                                 envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
 	WebFetch        ToolConfig         `json:"web_fetch"                                                envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
 	WriteFile       ToolConfig         `json:"write_file"                                               envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
+}
+
+// IsFilterSensitiveDataEnabled returns true if sensitive data filtering is enabled
+func (c *ToolsConfig) IsFilterSensitiveDataEnabled() bool {
+	return c.FilterSensitiveData
+}
+
+// GetFilterMinLength returns the minimum content length for filtering (default: 8)
+func (c *ToolsConfig) GetFilterMinLength() int {
+	if c.FilterMinLength <= 0 {
+		return 8
+	}
+	return c.FilterMinLength
 }
 
 type SearchCacheConfig struct {
@@ -1505,7 +1546,7 @@ func applySecurityConfig(cfg *Config, sec *SecurityConfig) error {
 
 	// Handle Weixin token
 	if sec.Channels.Weixin != nil && sec.Channels.Weixin.Token != "" {
-		cfg.Channels.Discord.token = sec.Channels.Discord.Token
+		cfg.Channels.Weixin.token = sec.Channels.Weixin.Token
 	}
 
 	// Handle DingTalk client secret
